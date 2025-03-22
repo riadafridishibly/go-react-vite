@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gin-contrib/static"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/sessions"
 	"github.com/markbates/goth"
 	"github.com/markbates/goth/gothic"
 	"github.com/markbates/goth/providers/google"
@@ -29,6 +31,7 @@ type ClientCreds struct {
 		RedirectURIs      []string `json:"redirect_uris"`
 		JavascriptOrigins []string `json:"javascript_origins"`
 	} `json:"web"`
+	SessionSecret string `json:"session_secret"`
 }
 
 func LoadClientCreds(filename string) (*ClientCreds, error) {
@@ -49,11 +52,31 @@ type providerContextKey struct {
 
 var ProviderParamKey = &providerContextKey{"provider"}
 
-func registerAuthRoutes(r *gin.Engine) {
+var isProd = os.Getenv("PROD") == "1"
+
+func setupOauthRoutes(r *gin.Engine, clientCreds *ClientCreds) {
+	goth.UseProviders(
+		google.New(
+			clientCreds.Web.ClientID,
+			clientCreds.Web.ClientSecret,
+			clientCreds.Web.RedirectURIs[0]),
+	)
+
 	gothic.GetProviderName = func(req *http.Request) (string, error) {
 		provider := req.Context().Value(ProviderParamKey).(string)
 		return provider, nil
 	}
+	secret, err := hex.DecodeString(clientCreds.SessionSecret)
+	if err != nil {
+		panic(err)
+	}
+	store := sessions.NewCookieStore(secret)
+	store.MaxAge(86400 * 30)
+	store.Options.Path = "/"
+	store.Options.HttpOnly = true // HttpOnly should always be enabled
+	store.Options.Secure = isProd // TODO: change to true in production
+
+	gothic.Store = store
 
 	r.GET("/api/auth/:provider/callback", func(c *gin.Context) {
 		provider := c.Param("provider")
@@ -85,15 +108,8 @@ func main() {
 		log.Fatalf("Failed to load client creds: %v", err)
 	}
 
-	// Setup goth here!
-
-	goth.UseProviders(
-		google.New(clientCreds.Web.ClientID, clientCreds.Web.ClientSecret, clientCreds.Web.RedirectURIs[0]),
-	)
-
 	r := gin.Default()
-
-	registerAuthRoutes(r)
+	setupOauthRoutes(r, clientCreds)
 
 	r.GET("/api/ping", func(c *gin.Context) {
 		c.String(http.StatusOK, "pong")
